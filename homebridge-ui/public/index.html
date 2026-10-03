@@ -1,0 +1,286 @@
+<style>
+  .paf-card { border: 1px solid var(--bs-border-color, rgba(128, 128, 128, 0.3)); border-radius: 8px; padding: 1.25rem; margin-bottom: 1rem; }
+  .paf-step { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.6; margin-bottom: 0.25rem; }
+  .paf-muted { opacity: 0.7; font-size: 0.9rem; }
+  .paf-device { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.6rem 0; border-top: 1px solid var(--bs-border-color, rgba(128, 128, 128, 0.2)); }
+  .paf-device:first-child { border-top: 0; }
+  .paf-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 0.4rem; vertical-align: middle; }
+  .paf-online { background: #2fb344; }
+  .paf-offline { background: #999; }
+  .paf-code { font-family: ui-monospace, monospace; letter-spacing: 0.3em; font-size: 1.25rem; max-width: 12rem; }
+  [hidden] { display: none !important; }
+</style>
+
+<!-- Signed in -->
+<div id="view-status" class="paf-card" hidden>
+  <div class="d-flex justify-content-between align-items-start mb-2">
+    <div>
+      <h5 class="mb-1">Connected to Philips Air+</h5>
+      <div class="paf-muted">Choose which fans appear in HomeKit. Save, then restart the plugin to apply.</div>
+    </div>
+    <button type="button" class="btn btn-sm btn-outline-secondary" id="btn-resign">Sign in again</button>
+  </div>
+  <div id="device-list" class="mt-3"></div>
+  <div id="device-loading" class="paf-muted mt-3">Loading your fans…</div>
+  <div id="device-error" class="text-danger mt-3" hidden></div>
+</div>
+
+<!-- Step 1: signing value from the APK -->
+<div id="view-apk" class="paf-card" hidden>
+  <div class="paf-step">Step 1 of 3</div>
+  <h5>Choose the Philips Air+ app file</h5>
+  <p class="paf-muted">
+    The Philips cloud only accepts requests signed with a value built into the Philips Air+ Android app
+    (<code>com.philips.ph.homecare</code>). Pick your copy of the APK and this page will read the value from it.
+    The file is read in your browser and isn't uploaded anywhere.
+  </p>
+  <input type="file" class="form-control" id="apk-file" accept=".apk,.xapk,.apkm,application/vnd.android.package-archive">
+  <div id="apk-status" class="paf-muted mt-2"></div>
+  <details class="mt-3">
+    <summary class="paf-muted">I already have the signing value</summary>
+    <div class="input-group mt-2">
+      <input type="text" class="form-control" id="msecret-manual" placeholder="a_0123…" spellcheck="false" autocomplete="off">
+      <button type="button" class="btn btn-primary" id="btn-msecret">Use this</button>
+    </div>
+  </details>
+  <div class="mt-3" id="apk-cancel-wrap" hidden>
+    <button type="button" class="btn btn-link px-0" data-cancel>Cancel</button>
+  </div>
+</div>
+
+<!-- Step 2: email -->
+<form id="view-email" class="paf-card" hidden>
+  <div class="paf-step">Step 2 of 3</div>
+  <h5>Sign in to your Philips account</h5>
+  <p class="paf-muted">Use the same email you use in the Philips Air+ app. Philips will email you a 6-digit code.</p>
+  <input type="email" class="form-control mb-3" id="email" placeholder="you@example.com" required autocomplete="email">
+  <button type="submit" class="btn btn-primary">Send code</button>
+  <button type="button" class="btn btn-link" data-back="apk">Back</button>
+</form>
+
+<!-- Step 3: one-time code -->
+<form id="view-code" class="paf-card" hidden>
+  <div class="paf-step">Step 3 of 3</div>
+  <h5>Enter the code</h5>
+  <p class="paf-muted">We sent a code to <strong id="email-echo"></strong>. It can take a minute to arrive.</p>
+  <input type="text" class="form-control paf-code mb-3" id="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autocomplete="one-time-code">
+  <button type="submit" class="btn btn-primary">Sign in</button>
+  <button type="button" class="btn btn-link" data-back="email">Back</button>
+</form>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const VIEWS = ['status', 'apk', 'email', 'code'];
+  const MSECRET = /^a_[0-9a-f]{32}$/;
+  const flow = { mSecret: null, email: null, vToken: null };
+  let config = {};
+
+  function show(view) {
+    for (const v of VIEWS) $(`view-${v}`).hidden = v !== view;
+    // The standard form (name, refresh interval) only makes sense once signed in.
+    if (view === 'status') homebridge.showSchemaForm(); else homebridge.hideSchemaForm();
+  }
+
+  const errMessage = (e) => e?.message || e?.error?.message || String(e);
+
+  async function saveConfig(patch) {
+    config = { ...config, ...patch, platform: 'PhilipsAirFan' };
+    if (!config.name) config.name = 'Philips Air+';
+    await homebridge.updatePluginConfig([config]);
+  }
+
+  // ---- APK reading: a minimal ZIP reader that only inflates the .dex entries ----
+
+  const bytes = async (blob, start, len) => new Uint8Array(await blob.slice(start, start + len).arrayBuffer());
+  const inflate = async (raw) =>
+    new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer());
+
+  async function* zipEntries(blob) {
+    const tailLen = Math.min(blob.size, 65557);
+    const tail = await bytes(blob, blob.size - tailLen, tailLen);
+    const tv = new DataView(tail.buffer);
+    let eocd = -1;
+    for (let i = tail.length - 22; i >= 0; i--) if (tv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+    if (eocd < 0) throw new Error("That file isn't an APK.");
+    const count = tv.getUint16(eocd + 10, true);
+    const cd = await bytes(blob, tv.getUint32(eocd + 16, true), tv.getUint32(eocd + 12, true));
+    const cv = new DataView(cd.buffer);
+    const utf8 = new TextDecoder();
+    for (let n = 0, p = 0; n < count && cv.getUint32(p, true) === 0x02014b50; n++) {
+      const method = cv.getUint16(p + 10, true);
+      const compSize = cv.getUint32(p + 20, true);
+      const nameLen = cv.getUint16(p + 28, true);
+      const localOff = cv.getUint32(p + 42, true);
+      const name = utf8.decode(cd.subarray(p + 46, p + 46 + nameLen));
+      p += 46 + nameLen + cv.getUint16(p + 30, true) + cv.getUint16(p + 32, true);
+      yield {
+        name,
+        async read() {
+          const h = new DataView((await bytes(blob, localOff, 30)).buffer);
+          const raw = await bytes(blob, localOff + 30 + h.getUint16(26, true) + h.getUint16(28, true), compSize);
+          return method === 0 ? raw : inflate(raw);
+        },
+      };
+    }
+  }
+
+  // The value has the distinctive form a_ + 32 hex chars inside the app's dex bytecode.
+  // .xapk / .apkm bundles hold the base APK as a nested zip.
+  async function findSecrets(blob, hits = new Set()) {
+    const latin1 = new TextDecoder('latin1');
+    for await (const e of zipEntries(blob)) {
+      if (e.name.endsWith('.dex')) {
+        for (const m of latin1.decode(await e.read()).matchAll(/a_[0-9a-f]{32}/g)) hits.add(m[0]);
+      } else if (e.name.endsWith('.apk')) {
+        try { await findSecrets(new Blob([await e.read()]), hits); } catch { /* not a nested apk */ }
+      }
+    }
+    return hits;
+  }
+
+  function useSecret(mSecret) {
+    flow.mSecret = mSecret;
+    show('email');
+    $('email').focus();
+  }
+
+  $('apk-file').addEventListener('change', async (ev) => {
+    const file = ev.target.files[0];
+    if (!file) return;
+    const status = $('apk-status');
+    status.className = 'paf-muted mt-2';
+    status.textContent = 'Reading the app file…';
+    try {
+      const hits = await findSecrets(file);
+      if (hits.size !== 1) {
+        throw new Error(hits.size
+          ? `Found ${hits.size} possible values, so can't tell which is right. Try the base APK rather than a bundle.`
+          : 'No signing value found. Make sure this is the Philips Air+ app (com.philips.ph.homecare).');
+      }
+      status.textContent = '';
+      useSecret([...hits][0]);
+    } catch (e) {
+      status.className = 'text-danger mt-2';
+      status.textContent = errMessage(e);
+    } finally {
+      ev.target.value = '';
+    }
+  });
+
+  $('btn-msecret').addEventListener('click', () => {
+    const v = $('msecret-manual').value.trim();
+    if (!MSECRET.test(v)) return homebridge.toast.error('It should look like a_ followed by 32 hex characters.');
+    useSecret(v);
+  });
+
+  // ---- Sign-in ----
+
+  $('view-email').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    flow.email = $('email').value.trim();
+    homebridge.showSpinner();
+    try {
+      flow.vToken = (await homebridge.request('/otp/send', { email: flow.email })).vToken;
+      $('email-echo').textContent = flow.email;
+      $('code').value = '';
+      show('code');
+      $('code').focus();
+    } catch (e) {
+      homebridge.toast.error(errMessage(e), "Couldn't send the code");
+    } finally {
+      homebridge.hideSpinner();
+    }
+  });
+
+  $('view-code').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    homebridge.showSpinner();
+    try {
+      const { userId, devices } = await homebridge.request('/otp/verify', { ...flow, code: $('code').value });
+      await saveConfig({ userId, mSecret: flow.mSecret });
+      await homebridge.savePluginConfig();
+      homebridge.toast.success(`Found ${devices.length} fan${devices.length === 1 ? '' : 's'}. Restart the plugin to add them to HomeKit.`, 'Signed in');
+      show('status');
+      renderDevices(devices);
+    } catch (e) {
+      homebridge.toast.error(errMessage(e), 'Sign-in failed');
+    } finally {
+      homebridge.hideSpinner();
+    }
+  });
+
+  document.querySelectorAll('[data-back]').forEach((b) => b.addEventListener('click', () => show(b.dataset.back)));
+  document.querySelectorAll('[data-cancel]').forEach((b) => b.addEventListener('click', () => show('status')));
+
+  $('btn-resign').addEventListener('click', () => {
+    $('apk-cancel-wrap').hidden = false;
+    $('apk-status').textContent = '';
+    show('apk');
+  });
+
+  // ---- Device list ----
+
+  function renderDevices(devices) {
+    $('device-loading').hidden = true;
+    $('device-error').hidden = true;
+    const list = $('device-list');
+    list.replaceChildren();
+    if (!devices.length) {
+      list.innerHTML = '<div class="paf-muted">No fans on this Philips account. Add the fan in the Philips Air+ app first.</div>';
+      return;
+    }
+    const ignored = new Set(config.ignore || []);
+    for (const d of devices) {
+      const row = document.createElement('div');
+      row.className = 'paf-device';
+      row.innerHTML = `
+        <div>
+          <div><span class="paf-dot ${d.online ? 'paf-online' : 'paf-offline'}"></span><strong></strong></div>
+          <div class="paf-muted"></div>
+        </div>
+        <div class="form-check form-switch m-0">
+          <input class="form-check-input" type="checkbox" role="switch" title="Show in HomeKit">
+        </div>`;
+      row.querySelector('strong').textContent = d.name;
+      row.querySelector('.paf-muted').textContent = `${d.model} · ${d.online ? 'online' : 'offline'}`;
+      const toggle = row.querySelector('input');
+      toggle.checked = !ignored.has(d.id);
+      toggle.addEventListener('change', async () => {
+        const set = new Set(config.ignore || []);
+        if (toggle.checked) set.delete(d.id); else set.add(d.id);
+        await saveConfig({ ignore: [...set] });
+      });
+      list.appendChild(row);
+    }
+  }
+
+  async function loadDevices() {
+    $('device-list').replaceChildren();
+    $('device-loading').hidden = false;
+    try {
+      const { devices } = await homebridge.request('/devices', { userId: config.userId, mSecret: config.mSecret });
+      renderDevices(devices);
+    } catch (e) {
+      $('device-loading').hidden = true;
+      $('device-error').hidden = false;
+      $('device-error').textContent = `Couldn't load your fans: ${errMessage(e)}`;
+    }
+  }
+
+  // Keep in step with edits made in the standard form below.
+  homebridge.addEventListener('configChanged', (ev) => {
+    if (Array.isArray(ev.data) && ev.data[0]) config = ev.data[0];
+  });
+
+  (async () => {
+    config = (await homebridge.getPluginConfig())[0] || {};
+    if (config.userId && MSECRET.test(config.mSecret || '')) {
+      show('status');
+      loadDevices();
+    } else {
+      show('apk');
+    }
+  })();
+})();
+</script>

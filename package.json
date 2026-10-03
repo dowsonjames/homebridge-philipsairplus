@@ -1,0 +1,50 @@
+{
+  "name": "homebridge-philips-air-fan",
+  "displayName": "Philips Air+ Fan",
+  "version": "1.0.0",
+  "description": "Control Philips Air+ cloud-connected fans (CX3550/01 and similar) from HomeKit: power, speed, oscillation, sleep and natural breeze modes.",
+  "author": "James Dowson",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dowsonjames/homebridge-philipsairplus.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dowsonjames/homebridge-philipsairplus/issues"
+  },
+  "homepage": "https://github.com/dowsonjames/homebridge-philipsairplus#readme",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "bin": {
+    "philips-air-fan-setup": "src/setup.js"
+  },
+  "engines": {
+    "node": "^20.18.0 || ^22.10.0 || ^24.0.0",
+    "homebridge": "^1.8.0 || ^2.0.0"
+  },
+  "keywords": [
+    "homebridge-plugin",
+    "homebridge",
+    "homekit",
+    "philips",
+    "air+",
+    "airplus",
+    "fan",
+    "cx3550",
+    "versuni"
+  ],
+  "files": [
+    "src",
+    "homebridge-ui",
+    "config.schema.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@homebridge/plugin-ui-utils": "^2.2.6",
+    "mqtt": "^5.10.0"
+  },
+  "devDependencies": {
+    "hap-nodejs": "^0.11.2"
+  }
+}

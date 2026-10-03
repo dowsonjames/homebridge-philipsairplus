@@ -1,0 +1,37 @@
+{
+  "pluginAlias": "PhilipsAirFan",
+  "pluginType": "platform",
+  "singular": true,
+  "customUi": true,
+  "customUiPath": "./homebridge-ui",
+  "headerDisplay": "Philips Air+ cloud fans (CX3550/01 and similar). Close the Philips Air+ phone app while Homebridge is running: the cloud allows one connection per account.",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "name": { "title": "Name", "type": "string", "default": "Philips Air+", "required": true },
+      "refreshSeconds": {
+        "title": "State refresh interval (seconds)",
+        "description": "How often to re-read the fan's state, so changes made with its own buttons show up in HomeKit. Changes made in HomeKit are confirmed within a few seconds either way.",
+        "type": "integer",
+        "default": 10,
+        "minimum": 5,
+        "maximum": 300
+      },
+      "userId": { "title": "User ID", "type": "string", "required": true },
+      "mSecret": { "title": "Signing value (mSecret)", "type": "string", "required": true, "pattern": "^a_[0-9a-f]{32}$" },
+      "ignore": { "title": "Device IDs to hide from HomeKit", "type": "array", "items": { "type": "string" } }
+    }
+  },
+  "layout": [
+    "name",
+    "refreshSeconds",
+    {
+      "type": "fieldset",
+      "title": "Advanced",
+      "description": "Filled in by signing in above. Only edit these by hand if you already have the values.",
+      "expandable": true,
+      "expanded": false,
+      "items": ["userId", "mSecret", { "key": "ignore", "type": "array", "items": [{ "key": "ignore[]", "title": "Device ID" }] }]
+    }
+  ]
+}
