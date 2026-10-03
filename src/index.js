@@ -17,6 +17,11 @@ const D = {
 const MODE_SLEEP = 17;
 const MODE_NATURAL = 130;
 const OSC_ON_WRITE = 90;
+// The Home app always draws RotationSpeed as a percentage, so map the three speeds onto
+// steps of 33 (33/66/99%) and the slider snaps to exactly three positions.
+const SPEED_STEP = 33;
+// Dragging the slider fires a set per step; only send the speed where it lands.
+const SPEED_DEBOUNCE_MS = 400;
 // How long a value we just wrote wins over a contradicting reported value, while the fan catches up.
 const PENDING_MS = 10_000;
 
@@ -104,13 +109,17 @@ class FanAccessory {
     fan.getCharacteristic(Characteristic.Active)
       .onGet(() => this.isOn() ? 1 : 0)
       .onSet((v) => this.send(v ? { [D.POWER]: 1 } : { [D.POWER]: 0 }));
-    // Three real speeds, so expose a 0-3 slider rather than a fake percentage.
     fan.getCharacteristic(Characteristic.RotationSpeed)
-      .setProps({ minValue: 0, maxValue: 3, minStep: 1 })
-      .onGet(() => this.isOn() ? this.level() : 0)
+      .setProps({ minValue: 0, maxValue: 3 * SPEED_STEP, minStep: SPEED_STEP })
+      .onGet(() => this.isOn() ? this.level() * SPEED_STEP : 0)
       .onSet((v) => {
-        const level = Math.round(v);
-        return this.send(level > 0 ? { [D.POWER]: 1, [D.LEVEL]: level, [D.MODE]: level } : { [D.POWER]: 0 });
+        const level = Math.max(0, Math.min(3, Math.round(v / SPEED_STEP)));
+        clearTimeout(this.speedTimer);
+        this.speedTimer = setTimeout(() => {
+          this.speedTimer = null;
+          // send() logs failures itself; there's no HomeKit request left to fail by now.
+          this.send(level > 0 ? { [D.POWER]: 1, [D.LEVEL]: level, [D.MODE]: level } : { [D.POWER]: 0 }).catch(() => {});
+        }, SPEED_DEBOUNCE_MS);
       });
     fan.getCharacteristic(Characteristic.SwingMode)
       .onGet(() => this.oscillating() ? 1 : 0)
@@ -164,7 +173,8 @@ class FanAccessory {
     if (m >= 1 && m <= 3) this.lastLevel = m;
     const C = this.C;
     this.fan.updateCharacteristic(C.Active, this.isOn() ? 1 : 0);
-    this.fan.updateCharacteristic(C.RotationSpeed, this.isOn() ? this.level() : 0);
+    // Don't yank the slider back while a speed change is waiting to be sent.
+    if (!this.speedTimer) this.fan.updateCharacteristic(C.RotationSpeed, this.isOn() ? this.level() * SPEED_STEP : 0);
     this.fan.updateCharacteristic(C.SwingMode, this.oscillating() ? 1 : 0);
     for (const p of this.presets) p.svc.updateCharacteristic(C.On, this.isOn() && m === p.mode);
   }
