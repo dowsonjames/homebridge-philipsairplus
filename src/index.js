@@ -22,6 +22,14 @@ const OSC_ON_WRITE = 90;
 const SPEED_STEP = 33;
 // Dragging the slider fires a set per step; only send the speed where it lands.
 const SPEED_DEBOUNCE_MS = 400;
+
+// Whether a reported value confirms one we wrote. The fan doesn't always echo the raw value back:
+// oscillation is written as 90 but reported as 23040, and mode 130 may come back as the signed byte -126.
+function confirms(key, written, reported) {
+  if (key === D.OSCILLATE) return (Number(written) !== 0) === (Number(reported) !== 0);
+  if (key === D.MODE) return (Number(written) & 0xff) === (Number(reported) & 0xff);
+  return Number(written) === Number(reported);
+}
 // How long a value we just wrote wins over a contradicting reported value, while the fan catches up.
 const PENDING_MS = 10_000;
 
@@ -125,19 +133,31 @@ class FanAccessory {
       .onGet(() => this.oscillating() ? 1 : 0)
       .onSet((v) => this.send({ [D.OSCILLATE]: v ? OSC_ON_WRITE : 0 }));
 
+    // A named Switch tile on the fan accessory. Subtype keys keep each service stable across restarts.
+    const addSwitch = (key, name) => {
+      const svc = accessory.getServiceById(Service.Switch, key) || accessory.addService(Service.Switch, `${accessory.displayName} ${name}`, key);
+      if (!svc.testCharacteristic(Characteristic.ConfiguredName)) svc.addOptionalCharacteristic(Characteristic.ConfiguredName);
+      svc.setCharacteristic(Characteristic.ConfiguredName, `${accessory.displayName} ${name}`);
+      return svc;
+    };
+
     this.presets = [
       { key: 'sleep', name: 'Sleep Mode', mode: MODE_SLEEP },
       { key: 'natural', name: 'Natural Breeze', mode: MODE_NATURAL },
     ].map((p) => {
-      const svc = accessory.getServiceById(Service.Switch, p.key) || accessory.addService(Service.Switch, `${accessory.displayName} ${p.name}`, p.key);
-      if (!svc.testCharacteristic(Characteristic.ConfiguredName)) svc.addOptionalCharacteristic(Characteristic.ConfiguredName);
-      svc.setCharacteristic(Characteristic.ConfiguredName, `${accessory.displayName} ${p.name}`);
+      const svc = addSwitch(p.key, p.name);
       svc.getCharacteristic(Characteristic.On)
         .onGet(() => this.isOn() && this.mode() === p.mode)
         // Turning a preset off drops back to manual mode at the last manual speed.
         .onSet((v) => this.send(v ? { [D.POWER]: 1, [D.MODE]: p.mode } : { [D.MODE]: this.lastLevel, [D.LEVEL]: this.lastLevel }));
       return { ...p, svc };
     });
+
+    // The Home app tucks Fanv2 SwingMode away (or hides it), so oscillation also gets its own tile.
+    this.oscillateSwitch = addSwitch('oscillate', 'Oscillate');
+    this.oscillateSwitch.getCharacteristic(Characteristic.On)
+      .onGet(() => this.oscillating())
+      .onSet((v) => this.send({ [D.OSCILLATE]: v ? OSC_ON_WRITE : 0 }));
 
     conn.on('reported', (r) => this.update(r));
   }
@@ -165,7 +185,7 @@ class FanAccessory {
     reported = { ...reported };
     for (const [k, p] of Object.entries(this.pending)) {
       if (!(k in reported)) continue;
-      if (Number(reported[k]) === Number(p.v) || now > p.until) delete this.pending[k];
+      if (confirms(k, p.v, reported[k]) || now > p.until) delete this.pending[k];
       else delete reported[k];
     }
     Object.assign(this.state, reported);
@@ -176,6 +196,7 @@ class FanAccessory {
     // Don't yank the slider back while a speed change is waiting to be sent.
     if (!this.speedTimer) this.fan.updateCharacteristic(C.RotationSpeed, this.isOn() ? this.level() * SPEED_STEP : 0);
     this.fan.updateCharacteristic(C.SwingMode, this.oscillating() ? 1 : 0);
+    this.oscillateSwitch.updateCharacteristic(C.On, this.oscillating());
     for (const p of this.presets) p.svc.updateCharacteristic(C.On, this.isOn() && m === p.mode);
   }
 }

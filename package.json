@@ -1,7 +1,7 @@
 {
   "name": "homebridge-philips-air-fan",
   "displayName": "Philips Air+ Fan",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Control Philips Air+ cloud-connected fans (CX3550/01 and similar) from HomeKit: power, speed, oscillation, sleep and natural breeze modes.",
   "author": "James Dowson",
   "license": "MIT",

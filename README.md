@@ -13,6 +13,7 @@ Each fan shows up as:
 - a **fan** with on/off, speed (1–3) and oscillation
 - a **Sleep Mode** switch
 - a **Natural Breeze** switch
+- an **Oscillate** switch (the Home app hides the fan's built-in oscillation control, so it gets its own tile)
 
 Changes made in the Home app are confirmed within a few seconds. Changes made with the fan's own buttons show up at the next state refresh, which is every 10 seconds by default.
 

@@ -7,7 +7,7 @@ const hap = require('hap-nodejs');
 const cloud = require('../src/cloud');
 
 const { Characteristic: C } = hap;
-const POWER = 'D03102', LEVEL = 'D0310D', MODE = 'D0310C';
+const POWER = 'D03102', LEVEL = 'D0310D', MODE = 'D0310C', OSC = 'D0320F';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 class FakeConn extends EventEmitter {
@@ -47,9 +47,24 @@ async function startPlugin() {
 let p;
 beforeEach(async () => { p = await startPlugin(); });
 
-test('exposes a fan plus two preset switches', () => {
+test('exposes a fan plus preset and oscillate switches', () => {
   const names = p.accessory.services.map((s) => s.displayName).filter(Boolean);
-  assert.deepEqual(names, ['Bedroom', 'Bedroom Sleep Mode', 'Bedroom Natural Breeze']);
+  assert.deepEqual(names, ['Bedroom', 'Bedroom Sleep Mode', 'Bedroom Natural Breeze', 'Bedroom Oscillate']);
+});
+
+test('oscillate switch writes the swing value and follows the fan', async () => {
+  const sw = p.accessory.getServiceById(hap.Service.Switch, 'oscillate').getCharacteristic(C.On);
+  await sw.handleSetRequest(true);
+  p.fan.update({ [OSC]: 23040 }); // what the fan reports while swinging
+  assert.equal(sw.value, true);
+  assert.equal(p.fan.fan.getCharacteristic(C.SwingMode).value, 1);
+  await sw.handleSetRequest(false);
+  p.fan.update({ [OSC]: 23040 }); // stale echo before the fan stops
+  assert.equal(sw.value, false);
+  p.fan.update({ [OSC]: 0 });
+  p.fan.update({ [OSC]: 23040 }); // later switched on with the fan's own button
+  assert.equal(sw.value, true);
+  assert.deepEqual(p.fan.conn.sent, [{ [OSC]: 90 }, { [OSC]: 0 }]);
 });
 
 test('speed slider snaps to three positions', () => {
